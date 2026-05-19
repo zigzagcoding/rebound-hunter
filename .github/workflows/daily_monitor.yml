@@ -1,0 +1,50 @@
+name: Daily Stock Monitor
+
+# トリガー条件
+on:
+  schedule:
+    # 平日 18:00 JST = UTC 09:00
+    # cron: 分 時 日 月 曜日
+    - cron: '0 9 * * 1-5'
+  
+  # 手動実行も可能にする(GitHub のUI上で「Run workflow」ボタンが出る)
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest  # GitHub が用意した Ubuntu 仮想マシンを使う
+    
+    steps:
+      # ステップ1: リポジトリをチェックアウト(コードを仮想マシンに持ってくる)
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # ステップ2: Python をセットアップ
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      # ステップ3: 依存ライブラリをインストール
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # ステップ4: Layer 2 を実行(株価監視)
+      - name: Run Layer 2 - Price Monitor
+        run: python scripts/layer2_monitor_prices.py
+      
+      # ステップ5: Layer 3 を実行(下落検知)
+      - name: Run Layer 3 - Drop Detection
+        run: python scripts/layer3_detect_drops.py
+      
+      # ステップ6: 結果をコミット
+      - name: Commit and push results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/snapshots/ data/triggers/
+          # 変更があるときだけコミット(なければスキップ)
+          git diff --staged --quiet || git commit -m "Auto-update: $(date +'%Y-%m-%d')"
+          git push
