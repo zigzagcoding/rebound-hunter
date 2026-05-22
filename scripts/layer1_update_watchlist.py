@@ -10,34 +10,52 @@ load_dotenv()
 API_KEY = os.getenv("EDINET_DB_API_KEY")
 BASE_URL = "https://edinetdb.jp/v1"
 
-# スクリーニング条件
-# 単位:時価総額は百万円(100,000 = 1000億円)
-# 単位:率はパーセント(10 = 10%)
 SCREENING_CONDITIONS = {
-    "roe_gte": 15,                # ROE 15%以上
-    "operating_margin_gte": 10,   # 営業利益率 10%以上
-    "equity_ratio_gte": 50,       # 自己資本比率 50%以上
-    "market_cap_gte": 200_000,    # 時価総額2000億円以上(=200,000百万円)
+    "roe_gte": 15,
+    "operating_margin_gte": 10,
+    "equity_ratio_gte": 50,
+    "market_cap_gte": 200_000,
     "limit": 500,
 }
 
 def fetch_screening_results():
-    """スクリーニングを実行して結果を取得"""
     headers = {"X-API-Key": API_KEY}
-    
     response = requests.get(
         f"{BASE_URL}/screener",
         params=SCREENING_CONDITIONS,
         headers=headers,
     )
-    
     if response.status_code != 200:
         print(f"[エラー] APIリクエスト失敗: {response.status_code}")
         print(f"  詳細: {response.text}")
         return None
-    
     payload = response.json()
     return payload.get("data", {}).get("companies", [])
+
+def convert_sec_code(sec_code: str) -> tuple[str, bool]:
+    """
+    新証券コード(5桁英数字)を旧コード(4桁数字)に変換
+    
+    Returns:
+        (変換後コード, yfinance利用可能フラグ)
+    """
+    if not sec_code:
+        return ("", False)
+    
+    sec_code = str(sec_code).strip()
+    
+    # 既に4桁数字ならそのまま
+    if len(sec_code) == 4 and sec_code.isdigit():
+        return (sec_code, True)
+    
+    # 5桁で末尾が0、前4桁が全て数字 → 末尾0を除く
+    if len(sec_code) == 5 and sec_code.endswith("0") and sec_code[:4].isdigit():
+        return (sec_code[:4], True)
+    
+    # 英字を含むコード → yfinanceでは扱えない可能性高い
+    # 末尾英字を除いた4桁を試す(例:418A0 → 418A → 不可)
+    # 一旦、変換不可として返す
+    return (sec_code, False)
 
 def update_watchlist():
     print("=== EDINET DB スクリーニング実行 ===")
@@ -56,27 +74,46 @@ def update_watchlist():
     print(f"取得銘柄数: {len(results)}")
     
     # 必要フィールドを抽出
-    # ※ハイフン区切りフィールドは辞書アクセスで取得
     watchlist_records = []
+    skipped_records = []  # yfinanceで扱えない銘柄を記録
+    
     for record in results:
-        sec_code = record.get("secCode")
-        if not sec_code:
+        raw_sec_code = record.get("secCode")
+        if not raw_sec_code:
+            continue
+        
+        # 証券コード変換
+        converted_code, is_usable = convert_sec_code(raw_sec_code)
+        
+        if not is_usable:
+            skipped_records.append({
+                "raw_code": raw_sec_code,
+                "name": record.get("filerName", ""),
+            })
             continue
         
         watchlist_records.append({
-            "code": sec_code,
+            "code": converted_code,
             "name": record.get("filerName", ""),
             "edinet_code": record.get("edinetCode", ""),
             "industry": record.get("industry", ""),
             "roe": record.get("roe"),
-            "operating_margin": record.get("operating-margin"),  # ハイフン形式
-            "equity_ratio": record.get("equity-ratio"),          # ハイフン形式
-            "market_cap": record.get("market-cap"),              # ハイフン形式(単位:百万円)
+            "operating_margin": record.get("operating-margin"),
+            "equity_ratio": record.get("equity-ratio"),
+            "market_cap": record.get("market-cap"),
         })
     
     if not watchlist_records:
-        print("[警告] secCode を持つ銘柄がゼロ")
+        print("[警告] yfinance で扱える銘柄がゼロ")
         return
+    
+    # スキップした銘柄を報告
+    if skipped_records:
+        print(f"\n[情報] yfinance非対応のためスキップ: {len(skipped_records)}件")
+        for s in skipped_records[:5]:  # 先頭5件のみ表示
+            print(f"  - {s['raw_code']}: {s['name']}")
+        if len(skipped_records) > 5:
+            print(f"  ... 他 {len(skipped_records) - 5} 件")
     
     df = pd.DataFrame(watchlist_records)
     df = df.drop_duplicates(subset=["code"])
@@ -89,7 +126,6 @@ def update_watchlist():
     if Path(output_path).exists():
         today = datetime.now().strftime("%Y-%m-%d")
         backup_path = f"data/watchlist_backup_{today}.csv"
-        # 既にバックアップがあれば上書き(同日複数回実行対応)
         if Path(backup_path).exists():
             Path(backup_path).unlink()
         Path(output_path).rename(backup_path)
